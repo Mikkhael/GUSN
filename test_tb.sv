@@ -17,6 +17,9 @@ parameter RAM_ADDR_W = 8;
 parameter RAM_DATA_W = NUM_W;
 parameter RAM_SIZE   = 2**RAM_ADDR_W;
 
+parameter RELU_SHIFT = 4;
+parameter RELU_MAX   = 1;
+
 parameter LAYERS_COUNT      = 3;
 parameter integer LAYER_SIZES [0:3] = {INPUTS, 5, 4, OUTPUTS};
 
@@ -39,6 +42,7 @@ wire [NUM_W - 1 : 0] ram_data_read;
 wor  mult_en;
 wor  signed [NUM_W - 1 : 0] mult_v1;
 wor  signed [NUM_W - 1 : 0] mult_v2;
+wor                         mult_shift;
 wire signed [NUM_W - 1 : 0] mult_res;
 
 RAM_WRAPPER #(
@@ -57,10 +61,12 @@ RAM_WRAPPER #(
 
 MULT_WRAPPER #(
     .INT_W   (INT_W),
-    .FRAC_W  (FRAC_W)
+    .FRAC_W  (FRAC_W),
+    .SHIFT   (RELU_SHIFT)
 ) mult (
     .mult_v1    (mult_v1),
     .mult_v2    (mult_v2),
+    .mult_shift (mult_shift),
     .mult_res   (mult_res)
 );
 
@@ -110,6 +116,8 @@ LAYER # (
     .INPUTS             (L_INPUTS),
     .OUTPUTS            (L_OUTPUTS),
     .RAM_ADDR_START     (L_RAM_START),
+    .RELU_SHIFT         (RELU_SHIFT),
+    .RELU_MAX           (RELU_MAX),
     .RAM_DELAY          (1)
 ) layer (
     .clk        (clk),
@@ -124,6 +132,7 @@ LAYER # (
     .mult_en    (mult_en),
     .mult_v1    (mult_v1),
     .mult_v2    (mult_v2),
+    .mult_shift (mult_shift),
     .mult_res   (mult_res),
 
     .ram_write      (ram_write),
@@ -161,6 +170,21 @@ end endgenerate
 assign outputs     = generate_layers[LAYERS_COUNT - 1].l_outputs_f;
 assign inputs_diff = generate_layers[0].l_outputs_b;
 
+generate for(i = 0; i < OUTPUTS; i++) begin
+    assign outputs_diff[i] = loss_function(1, i, outputs);
+end endgenerate
+
+parameter OUTPUTS_W = $clog2(OUTPUTS);
+function [NUM_W - 1 : 0] loss_function (
+    input [OUTPUTS_W-1 : 0] label,
+    input [OUTPUTS_W-1 : 0] output_id,
+    input signed [NUM_W - 1 : 0] outputs [0 : OUTPUTS - 1]);
+begin
+    if(label == output_id) loss_function = (RELU_MAX - outputs[output_id]);
+    else                   loss_function = (0        - outputs[output_id]);
+end endfunction
+
+
 always #10 clk = !clk;
 
 initial begin
@@ -171,8 +195,8 @@ end
 integer j;
 initial begin
     for(j = 0; j<RAM_SIZE; j++) begin
-        ram.data[j] = j << (FRAC_W-1); 
-        if(j % 2000 == 0) ram.data[j] = -ram.data[j];
+        ram.data[j] = $random() % (1 << (FRAC_W + 1));
+        if($random() % 2 == 0) ram.data[j] = -ram.data[j];
     end
     #100;
     nreset = 1;
@@ -192,6 +216,16 @@ initial begin
     $display("LAYER 2 MATCHES F: %d", generate_layers[1].layer_test.matches_f_sim);
     $display("LAYER 3 MATCHES F: %d", generate_layers[2].layer_test.matches_f_sim);
 
+    #20;
+    start_b = 1;
+    #20
+    start_b = 0;
+
+    wait(all_ready);
+
+    $display("LAYER 3 MATCHES B: %d", generate_layers[2].layer_test.matches_b_sim);
+    $display("LAYER 2 MATCHES B: %d", generate_layers[1].layer_test.matches_b_sim);
+    $display("LAYER 1 MATCHES B: %d", generate_layers[0].layer_test.matches_b_sim);
 
     #100;
     $stop;
@@ -206,6 +240,8 @@ module LAYER_TEST # (
     parameter INT_W  = 8,
     parameter FRAC_W = 8,
     parameter RAM_SIZE   = 0,
+    parameter RELU_SHIFT = 4,
+    parameter RELU_MAX   = 1,
     parameter RAM_ADDR_START = 0,
     parameter LAYER_ID = 0,
     parameter NUM_W  = INT_W + FRAC_W
@@ -231,12 +267,26 @@ module LAYER_TEST # (
 parameter signed [NUM_W - 1 : 0] MAX_VALUE_POS = {1'b0, {(NUM_W-1){1'b1}}};
 parameter signed [NUM_W - 1 : 0] MAX_VALUE_NEG = {1'b1, {(NUM_W-1){1'b0}}};
 
+
 reg signed [NUM_W*2 - 1 : 0] temp;
 reg signed [NUM_W*2 - 1 : 0] temp2;
 reg signed [NUM_W   - 1 : 0] results_f_sim [0 : OUTPUTS-1];
 reg signed [NUM_W   - 1 : 0] results_b_sim [0 : INPUTS-1];
 reg                        matches_f_sim;
+reg                        matches_b_sim;
 assign matches_f_sim = results_f_sim == results_f;
+assign matches_b_sim = results_b_sim == results_b;
+
+
+wire results_f_diffshift_sim [0 : OUTPUTS-1];
+
+genvar g;
+generate for(g=0; g<OUTPUTS; g++) begin
+assign results_f_diffshift_sim[g] =
+        results_f_sim[g] > (RELU_MAX << FRAC_W) ? 1 :
+        results_f_sim[g] < 0                    ? 1 :
+                                                  0;
+end endgenerate
 
 reg is_waiting_for_ready_f = 1'd0;
 reg is_waiting_for_ready_b = 1'd0;
@@ -266,7 +316,29 @@ always @(posedge clk, negedge nreset) begin
                          if(temp < MAX_VALUE_NEG) results_f_sim[i] = MAX_VALUE_NEG;
                     else if(temp > MAX_VALUE_POS) results_f_sim[i] = MAX_VALUE_POS;
                     else                          results_f_sim[i] = temp;
-                    $display("LAYER %0d = OUT: %0d (%h) [%h] <%h>, IN: %0d (%h), RAM: %0d (%h)", LAYER_ID, i, results_f_sim[i], temp, temp2, j, inputs_f[j], ram_off_sim, ram_data[ram_off_sim]);
+                    // $display("LAYER %0d = OUT: %0d (%h) [%h] <%h>, IN: %0d (%h), RAM: %0d (%h)", LAYER_ID, i, results_f_sim[i], temp, temp2, j, inputs_f[j], ram_off_sim, ram_data[ram_off_sim]);
+                    ram_off_sim += 1;
+                end
+            end 
+        end
+        if(is_waiting_for_ready_b && ready_b) begin
+            is_waiting_for_ready_b <= 1'd0;
+            results_b_sim = '{default : 0};
+            ram_off_sim   = RAM_ADDR_START;
+            for(i = 0; i < OUTPUTS; i++) begin
+                for(j = 0; j <= INPUTS; j++) begin
+                    if(j == INPUTS) begin
+                        temp   = 0;
+                        temp2 = -1;
+                    end else begin
+                        temp2 = my_mult(ram_data[ram_off_sim], inputs_b[i]);
+                        temp2 = results_f_diffshift_sim[i] ? (temp2 >>> RELU_SHIFT) : temp2;
+                        temp  = temp2 + results_b_sim[j];
+                             if(temp < MAX_VALUE_NEG) results_b_sim[j] = MAX_VALUE_NEG;
+                        else if(temp > MAX_VALUE_POS) results_b_sim[j] = MAX_VALUE_POS;
+                        else                          results_b_sim[j] = temp;
+                    end
+                    $display("BACK_A %0d = OUT: %0d (%h) [%h] <%h>, IN: %0d (%h), RAM: %0d (%h)", LAYER_ID, j, results_b_sim[j], temp, temp2, i, inputs_b[i], ram_off_sim, ram_data[ram_off_sim]);
                     ram_off_sim += 1;
                 end
             end 

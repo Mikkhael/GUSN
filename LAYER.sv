@@ -11,6 +11,7 @@ module LAYER #(
     parameter RAM_DELAY = 3,
 
     parameter RELU_SHIFT = 4,
+    parameter RELU_MAX   = 4,
     parameter NUM_W = INT_W + FRAC_W
 ) (
     input clk,
@@ -25,6 +26,7 @@ module LAYER #(
     output reg signed                       mult_en,
     output     signed [NUM_W - 1 : 0]       mult_v1,
     output     signed [NUM_W - 1 : 0]       mult_v2,
+    output                                  mult_shift,
     input      signed [NUM_W - 1 : 0]       mult_res,
     
     output reg                              ram_write,
@@ -58,8 +60,9 @@ module LAYER #(
 
     // Out
 
-    reg signed [NUM_W - 1 : 0] results_f [0 : OUTPUTS - 1];
-    reg signed [NUM_W - 1 : 0] results_b [0 : INPUTS  - 1];
+    reg signed [NUM_W - 1 : 0] results_f        [0 : OUTPUTS - 1];
+    wire                       results_f_shifts [0 : OUTPUTS - 1];
+    reg signed [NUM_W - 1 : 0] results_b        [0 : INPUTS  - 1];
 
     wire signed [NUM_W - 1 : 0] v1 = ram_data_read;
     wire signed [NUM_W - 1 : 0] v2 = is_back ?
@@ -68,15 +71,30 @@ module LAYER #(
 
     assign mult_v1 = mult_en ? v1 : 0;
     assign mult_v2 = mult_en ? v2 : 0;
+    assign mult_shift = (mult_en && is_back) ? results_f_shifts[cnt_n_real] : 1'd0;
 
     genvar i;
     generate for(i = 0; i<OUTPUTS; i++) begin
-        assign output_f[i] = results_f[i] > 0 ? 
-                                    results_f[i] :
-                                    results_f[i] >>> RELU_SHIFT;
+        assign output_f[i]         = activation_clamped_RELU(results_f[i]);
+        assign results_f_shifts[i] = activation_clamped_RELU_diffshift(results_f[i]);
     end endgenerate
+    assign output_b = results_b;
 
     assign ready_out = !is_busy;
+
+    function signed [NUM_W - 1 : 0] activation_clamped_RELU (input signed [NUM_W - 1 : 0] in); begin
+        activation_clamped_RELU =
+            in > (RELU_MAX << FRAC_W) ? ((in - (RELU_MAX << FRAC_W)) >>> RELU_SHIFT) + (RELU_MAX << FRAC_W) :
+            in < 0                    ? ((in                       ) >>> RELU_SHIFT)                        :
+                                        ((in                       )               );
+    end endfunction
+    
+    function activation_clamped_RELU_diffshift (input signed [NUM_W - 1 : 0] in); begin
+        activation_clamped_RELU_diffshift =
+            in > (RELU_MAX << FRAC_W) ? 1'd1 :
+            in < 0                    ? 1'd1 :
+                                        1'd0;
+    end endfunction
 
     // Tasks
 
@@ -121,21 +139,21 @@ module LAYER #(
     parameter signed [NUM_W - 1 : 0] MAX_VALUE_POS = {1'b0, {(NUM_W-1){1'b1}}};
     parameter signed [NUM_W - 1 : 0] MAX_VALUE_NEG = {1'b1, {(NUM_W-1){1'b0}}};
 
-    wire signed [NUM_W - 1 : 0] value_to_add_f_1 = results_f[cnt_n_real];
-    wire signed [NUM_W - 1 : 0] value_to_add_f_2 = (cnt_w_real == INPUTS ? ram_data_read : mult_res);
-    
-    wire signed [NUM_W - 1 : 0] value_to_add_f_1_sign = value_to_add_f_1[NUM_W - 1];
-    wire signed [NUM_W - 1 : 0] value_to_add_f_2_sign = value_to_add_f_2[NUM_W - 1];
-
-    wire signed [NUM_W - 1 : 0] add_result_f          = value_to_add_f_1 + value_to_add_f_2;
-    wire signed [NUM_W - 1 : 0] add_result_f_sign     = add_result_f[NUM_W - 1];
-
-    wire                        add_result_f_overflow = (value_to_add_f_1_sign == value_to_add_f_2_sign) &&
-                                                        (value_to_add_f_1_sign != add_result_f_sign);
-    wire signed [NUM_W - 1 : 0] add_result_f_clumped  =  
-            (add_result_f_overflow &&  value_to_add_f_1_sign) ? MAX_VALUE_NEG :
-            (add_result_f_overflow && !value_to_add_f_1_sign) ? MAX_VALUE_POS :
-                                                                add_result_f;
+    function signed [NUM_W - 1 : 0] get_clumped_sum (input signed [NUM_W - 1 : 0] v1, input signed [NUM_W - 1 : 0] v2);
+        logic v1_sign, v2_sign, res_sign;
+        logic overflow;
+        logic signed [NUM_W - 1 : 0] res;
+    begin
+        v1_sign  = v1[NUM_W - 1];
+        v2_sign  = v2[NUM_W - 1];
+        res      = v1 + v2;
+        res_sign = res[NUM_W - 1];
+        overflow = (v1_sign == v2_sign) && (v1_sign != res_sign);
+        get_clumped_sum = 
+            (overflow && !v1_sign) ? MAX_VALUE_POS :
+            (overflow &&  v1_sign) ? MAX_VALUE_NEG :
+                                     res;
+    end endfunction
 
     always @(posedge clk, negedge nreset) begin
         if(!nreset) begin
@@ -148,7 +166,12 @@ module LAYER #(
             results_b <= '{default: 0};
         end else if(enable) begin
             if(is_busy &&  is_back && is_waiting_for_ready) begin // Wait for ready for BackPropagation
-                // TODO
+                if(ready_b_in) begin
+                    cnt_delay     <= RAM_DELAY;
+                    ram_addr_read <= RAM_ADDR_START;
+                    mult_en       <= 1'd1;
+                    is_waiting_for_ready <= 1'd0;
+                end
             end else 
             if(is_busy && !is_back && is_waiting_for_ready) begin // Wait for ready for ForwardPass
                 if(ready_f_in) begin
@@ -159,12 +182,28 @@ module LAYER #(
                 end
             end else 
             if(is_busy &&  is_back) begin // Calculate BackPropagation
-                // TODO
+                INC_RAM_READ();
+                if(cnt_delay == 0) begin
+                    if(cnt_w_real != INPUTS) begin
+                        results_b[cnt_w_real] <= get_clumped_sum(
+                            results_b[cnt_w_real],
+                            mult_res
+                        );
+                    end
+                    if(cnt_n_real == OUTPUTS-1 && cnt_w_real == INPUTS) begin // Check if last operation
+                        is_busy <= 1'd0;
+                        RESET_COUNTERS();
+                        RESET_BUSES();
+                    end
+                end
             end else 
             if(is_busy && !is_back) begin // Calculate ForwardPass
                 INC_RAM_READ();
                 if(cnt_delay == 0) begin
-                    results_f[cnt_n_real] <= add_result_f_clumped;
+                    results_f[cnt_n_real] <= get_clumped_sum(
+                        results_f[cnt_n_real],
+                        cnt_w_real == INPUTS ? ram_data_read : mult_res
+                    );
                     if(cnt_n_real == OUTPUTS-1 && cnt_w_real == INPUTS) begin // Check if last operation
                         is_busy <= 1'd0;
                         RESET_COUNTERS();
