@@ -1,10 +1,10 @@
 module ARBITER #(
-    parameter SOURCES = 1,
+    parameter SOURCES = 1
 ) (
     output arb_struct_out,
     input  arb_structs_in,
 
-    input  n_mult_en,
+    input  n_mult_en
 );
 
 `include "arb_struct.svh"
@@ -12,7 +12,7 @@ module ARBITER #(
 wire arb_struct_t arb_structs_in [0 : SOURCES - 1];
      arb_struct_t arb_struct_out;
 
-wire n_mult_en [0 : SOURCES - 1];
+wire n_mult_en [0 : SOURCES - 1];as
 
 logic done;
 integer i;

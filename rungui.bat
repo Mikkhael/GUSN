@@ -1,0 +1,1 @@
+qrun -f filelist.f -do "do wave.do; run -all" -gui -voptargs="+acc" -vlog.options -define SIMULATION -end

@@ -1,0 +1,1 @@
+qrun -f filelist.f -voptargs="+acc" -vlog.options -define SIMULATION -end
