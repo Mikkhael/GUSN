@@ -10,7 +10,7 @@ reg enable = 0;
 
 parameter INPUTS  = 3;
 parameter OUTPUTS = 2;
-parameter INT_W  = 8;
+parameter INT_W  = 9;
 parameter FRAC_W = 8;
 parameter NUM_W  = INT_W + FRAC_W;
 parameter RAM_ADDR_W = 8;
@@ -172,7 +172,7 @@ integer j;
 initial begin
     for(j = 0; j<RAM_SIZE; j++) begin
         ram.data[j] = j << (FRAC_W-1); 
-        if(j % 2 == 0) ram.data[j] = -ram.data[j];
+        if(j % 2000 == 0) ram.data[j] = -ram.data[j];
     end
     #100;
     nreset = 1;
@@ -228,8 +228,13 @@ module LAYER_TEST # (
     input [NUM_W - 1 : 0] ram_data [0 : RAM_SIZE-1]
 );
 
-reg signed [NUM_W - 1 : 0] results_f_sim [0 : OUTPUTS-1];
-reg signed [NUM_W - 1 : 0] results_b_sim [0 : INPUTS-1];
+parameter signed [NUM_W - 1 : 0] MAX_VALUE_POS = {1'b0, {(NUM_W-1){1'b1}}};
+parameter signed [NUM_W - 1 : 0] MAX_VALUE_NEG = {1'b1, {(NUM_W-1){1'b0}}};
+
+reg signed [NUM_W*2 - 1 : 0] temp;
+reg signed [NUM_W*2 - 1 : 0] temp2;
+reg signed [NUM_W   - 1 : 0] results_f_sim [0 : OUTPUTS-1];
+reg signed [NUM_W   - 1 : 0] results_b_sim [0 : INPUTS-1];
 reg                        matches_f_sim;
 assign matches_f_sim = results_f_sim == results_f;
 
@@ -253,8 +258,15 @@ always @(posedge clk, negedge nreset) begin
             ram_off_sim   = RAM_ADDR_START;
             for(i = 0; i < OUTPUTS; i++) begin
                 for(j = 0; j <= INPUTS; j++) begin
-                    results_f_sim[i] += j == INPUTS ? ram_data[ram_off_sim] : my_mult(ram_data[ram_off_sim], inputs_f[j]);
-                    $display("LAYER %d = OUT: %d (%h), IN: %d (%h), RAM: %d (%h)", LAYER_ID, i, results_f_sim[i], j, inputs_f[j], ram_off_sim, ram_data[ram_off_sim]);
+                    temp2 = my_mult(ram_data[ram_off_sim], inputs_f[j]);
+                    temp = results_f_sim[i] + (j == INPUTS ?
+                                $signed(ram_data[ram_off_sim]) : 
+                                temp2
+                            );
+                         if(temp < MAX_VALUE_NEG) results_f_sim[i] = MAX_VALUE_NEG;
+                    else if(temp > MAX_VALUE_POS) results_f_sim[i] = MAX_VALUE_POS;
+                    else                          results_f_sim[i] = temp;
+                    $display("LAYER %0d = OUT: %0d (%h) [%h] <%h>, IN: %0d (%h), RAM: %0d (%h)", LAYER_ID, i, results_f_sim[i], temp, temp2, j, inputs_f[j], ram_off_sim, ram_data[ram_off_sim]);
                     ram_off_sim += 1;
                 end
             end 
@@ -266,7 +278,11 @@ function signed [NUM_W - 1 : 0] my_mult(input signed [NUM_W - 1 : 0] v1, input s
     logic signed [NUM_W*2 - 1 : 0] temp;
 begin
     temp = v1 * v2;
-    my_mult = temp >> FRAC_W;
+    temp = temp >>> FRAC_W;
+    // $display("-   %h * %h = %h", v1, v2, temp);
+         if(temp > MAX_VALUE_POS) my_mult = MAX_VALUE_POS;
+    else if(temp < MAX_VALUE_NEG) my_mult = MAX_VALUE_NEG;
+    else                          my_mult = temp;
 end endfunction
 
 endmodule
