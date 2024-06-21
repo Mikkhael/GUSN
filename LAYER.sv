@@ -41,9 +41,8 @@ module LAYER #(
     input start_b
 );
 
-    localparam INPUTS_W  = $clog2(INPUTS)  == 0 ? 1 : $clog2(INPUTS);
-    localparam OUTPUTS_W = $clog2(OUTPUTS) == 0 ? 1 : $clog2(OUTPUTS);
-    localparam MAX_CNT_W = INPUTS_W > OUTPUTS_W ? INPUTS_W : OUTPUTS_W;
+    localparam INPUTS_W  = $clog2(INPUTS+1);
+    localparam OUTPUTS_W = $clog2(OUTPUTS+1);
 
     // State
 
@@ -150,6 +149,8 @@ module LAYER #(
                                                 (cnt_w_real == INPUTS ? ram_data_read : mult_res); // Don't multiply BIAS
                     if(cnt_n_real == OUTPUTS-1 && cnt_w_real == INPUTS) begin // Check if last operation
                         is_busy <= 1'd0;
+                        RESET_COUNTERS();
+                        RESET_BUSES();
                     end
                 end
             end else 
