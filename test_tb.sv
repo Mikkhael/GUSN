@@ -212,9 +212,9 @@ initial begin
 
     wait(all_ready);
 
-    $display("LAYER 1 MATCHES F: %d", generate_layers[0].layer_test.matches_f_sim);
-    $display("LAYER 2 MATCHES F: %d", generate_layers[1].layer_test.matches_f_sim);
-    $display("LAYER 3 MATCHES F: %d", generate_layers[2].layer_test.matches_f_sim);
+    $display("LAYER 1 MATCHES F:  %d", generate_layers[0].layer_test.matches_f_sim);
+    $display("LAYER 2 MATCHES F:  %d", generate_layers[1].layer_test.matches_f_sim);
+    $display("LAYER 3 MATCHES F:  %d", generate_layers[2].layer_test.matches_f_sim);
 
     #20;
     start_b = 1;
@@ -223,9 +223,13 @@ initial begin
 
     wait(all_ready);
 
-    $display("LAYER 3 MATCHES B: %d", generate_layers[2].layer_test.matches_b_sim);
-    $display("LAYER 2 MATCHES B: %d", generate_layers[1].layer_test.matches_b_sim);
-    $display("LAYER 1 MATCHES B: %d", generate_layers[0].layer_test.matches_b_sim);
+    $display("LAYER 3 MATCHES B:  %d", generate_layers[2].layer_test.matches_b_sim);
+    $display("LAYER 2 MATCHES B:  %d", generate_layers[1].layer_test.matches_b_sim);
+    $display("LAYER 1 MATCHES B:  %d", generate_layers[0].layer_test.matches_b_sim);
+    
+    $display("LAYER 3 MATCHES BW: %d", generate_layers[2].layer_test.matches_bw_sim);
+    $display("LAYER 2 MATCHES BW: %d", generate_layers[1].layer_test.matches_bw_sim);
+    $display("LAYER 1 MATCHES BW: %d", generate_layers[0].layer_test.matches_bw_sim);
 
     #100;
     $stop;
@@ -270,12 +274,26 @@ parameter signed [NUM_W - 1 : 0] MAX_VALUE_NEG = {1'b1, {(NUM_W-1){1'b0}}};
 
 reg signed [NUM_W*2 - 1 : 0] temp;
 reg signed [NUM_W*2 - 1 : 0] temp2;
-reg signed [NUM_W   - 1 : 0] results_f_sim [0 : OUTPUTS-1];
-reg signed [NUM_W   - 1 : 0] results_b_sim [0 : INPUTS-1];
+reg signed [NUM_W   - 1 : 0] results_f_sim  [0 : OUTPUTS-1];
+reg signed [NUM_W   - 1 : 0] results_b_sim  [0 : INPUTS-1];
+reg signed [NUM_W   - 1 : 0] results_bw_sim [0 : (INPUTS+1)*OUTPUTS-1];
 reg                        matches_f_sim;
 reg                        matches_b_sim;
-assign matches_f_sim = results_f_sim == results_f;
-assign matches_b_sim = results_b_sim == results_b;
+reg                        matches_bw_sim;
+assign matches_f_sim  = results_f_sim == results_f;
+assign matches_b_sim  = results_b_sim == results_b;
+assign matches_bw_sim = compare_ram(ram_data, results_bw_sim);
+
+function compare_ram(input [NUM_W - 1 : 0] ram [0 : RAM_SIZE - 1], input signed [NUM_W - 1 : 0] sim [0 : (INPUTS+1)*OUTPUTS-1] );
+    integer k;
+begin
+    compare_ram = 1;
+    for(k = 0; k < (INPUTS+1)*OUTPUTS && compare_ram; k++) begin
+        if($signed(ram[k + RAM_ADDR_START]) != sim[k]) begin
+            compare_ram = 0;
+        end
+    end
+end endfunction
 
 
 wire results_f_diffshift_sim [0 : OUTPUTS-1];
@@ -295,8 +313,9 @@ integer i,j;
 integer ram_off_sim;
 always @(posedge clk, negedge nreset) begin
     if(!nreset) begin
-        results_b_sim = '{default : 0};
-        results_f_sim = '{default : 0};
+        results_b_sim  = '{default : 0};
+        results_f_sim  = '{default : 0};
+        results_bw_sim = '{default : 0};
         is_waiting_for_ready_f = 1'd0;
         is_waiting_for_ready_b = 1'd0;
     end else if(enable) begin
@@ -308,53 +327,66 @@ always @(posedge clk, negedge nreset) begin
             ram_off_sim   = RAM_ADDR_START;
             for(i = 0; i < OUTPUTS; i++) begin
                 for(j = 0; j <= INPUTS; j++) begin
-                    temp2 = my_mult(ram_data[ram_off_sim], inputs_f[j]);
-                    temp = results_f_sim[i] + (j == INPUTS ?
-                                $signed(ram_data[ram_off_sim]) : 
-                                temp2
-                            );
-                         if(temp < MAX_VALUE_NEG) results_f_sim[i] = MAX_VALUE_NEG;
-                    else if(temp > MAX_VALUE_POS) results_f_sim[i] = MAX_VALUE_POS;
-                    else                          results_f_sim[i] = temp;
-                    // $display("LAYER %0d = OUT: %0d (%h) [%h] <%h>, IN: %0d (%h), RAM: %0d (%h)", LAYER_ID, i, results_f_sim[i], temp, temp2, j, inputs_f[j], ram_off_sim, ram_data[ram_off_sim]);
+                    if(j == INPUTS) begin
+                        temp2            = 0;
+                        results_f_sim[i] = my_add (results_f_sim[i],  $signed(ram_data[ram_off_sim]) );
+                    end else begin
+                        temp2            = my_mult(ram_data[ram_off_sim], inputs_f[j], 1'd0);
+                        results_f_sim[i] = my_add (results_f_sim[i], temp2 );
+                    end
+                    // $display("LAYER %0d = OUT: %0d (%h) <%h>, IN: %0d (%h), RAM: %0d (%h)", LAYER_ID, i, results_f_sim[i], temp2, j, inputs_f[j], ram_off_sim, ram_data[ram_off_sim]);
                     ram_off_sim += 1;
                 end
             end 
         end
         if(is_waiting_for_ready_b && ready_b) begin
             is_waiting_for_ready_b <= 1'd0;
-            results_b_sim = '{default : 0};
+            results_b_sim  = '{default : 0};
+            results_bw_sim = '{default : 0};
             ram_off_sim   = RAM_ADDR_START;
             for(i = 0; i < OUTPUTS; i++) begin
                 for(j = 0; j <= INPUTS; j++) begin
                     if(j == INPUTS) begin
-                        temp   = 0;
-                        temp2 = -1;
+                        temp2 = 0;
+                        temp                        = my_mult(1 << FRAC_W, inputs_b[i], results_f_diffshift_sim[i]);
+                        results_bw_sim[ram_off_sim] = my_add (results_bw_sim[ram_off_sim], temp);
                     end else begin
-                        temp2 = my_mult(ram_data[ram_off_sim], inputs_b[i]);
-                        temp2 = results_f_diffshift_sim[i] ? (temp2 >>> RELU_SHIFT) : temp2;
-                        temp  = temp2 + results_b_sim[j];
-                             if(temp < MAX_VALUE_NEG) results_b_sim[j] = MAX_VALUE_NEG;
-                        else if(temp > MAX_VALUE_POS) results_b_sim[j] = MAX_VALUE_POS;
-                        else                          results_b_sim[j] = temp;
+                        temp2            = my_mult(ram_data[ram_off_sim], inputs_b[i], results_f_diffshift_sim[i]);
+                        results_b_sim[j] = my_add (results_b_sim[j], temp2);
+                        temp                        = my_mult(inputs_f[j], inputs_b[i], results_f_diffshift_sim[i]);
+                        results_bw_sim[ram_off_sim] = my_add (ram_data[ram_off_sim], temp);
                     end
-                    $display("BACK_A %0d = OUT: %0d (%h) [%h] <%h>, IN: %0d (%h), RAM: %0d (%h)", LAYER_ID, j, results_b_sim[j], temp, temp2, i, inputs_b[i], ram_off_sim, ram_data[ram_off_sim]);
+                    $display("BACK   %0d = OUT: %0d (%h) <%h>, IN: %0d (%h), RAM: %0d (%h)", LAYER_ID, j, results_b_sim[j], temp2, i, inputs_b[i], ram_off_sim, ram_data[ram_off_sim]);
+                    $display("BACK_W %0d = OUT: %0d (%h) <%h>, IN: %0d (%h), INF: %0d (%h)", LAYER_ID, ram_off_sim, results_bw_sim[ram_off_sim], temp, i, inputs_b[i], j, inputs_f[j]);
                     ram_off_sim += 1;
                 end
-            end 
+            end
         end
     end
 end
 
-function signed [NUM_W - 1 : 0] my_mult(input signed [NUM_W - 1 : 0] v1, input signed [NUM_W - 1 : 0] v2 );
+function signed [NUM_W - 1 : 0] my_mult(input signed [NUM_W - 1 : 0] v1, input signed [NUM_W - 1 : 0] v2, input with_shift);
     logic signed [NUM_W*2 - 1 : 0] temp;
 begin
     temp = v1 * v2;
     temp = temp >>> FRAC_W;
+    if(with_shift) begin
+        temp = temp >>> RELU_SHIFT;
+    end
     // $display("-   %h * %h = %h", v1, v2, temp);
          if(temp > MAX_VALUE_POS) my_mult = MAX_VALUE_POS;
     else if(temp < MAX_VALUE_NEG) my_mult = MAX_VALUE_NEG;
     else                          my_mult = temp;
+end endfunction
+
+function signed [NUM_W - 1 : 0] my_add(input signed [NUM_W - 1 : 0] v1, input signed [NUM_W - 1 : 0] v2);
+    logic signed [NUM_W*2 - 1 : 0] temp;
+begin
+    temp = v1 + v2;
+    // $display("-   %h + %h = %h", v1, v2, temp);
+         if(temp > MAX_VALUE_POS) my_add = MAX_VALUE_POS;
+    else if(temp < MAX_VALUE_NEG) my_add = MAX_VALUE_NEG;
+    else                          my_add = temp;
 end endfunction
 
 endmodule
