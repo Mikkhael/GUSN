@@ -34,7 +34,7 @@ wire        [OUTPUTS_W - 1 : 0] output_label;
 reg  signed [NUM_W - 1 : 0] inputs       [0 : INPUTS-1];
 wire signed [NUM_W - 1 : 0] inputs_diff  [0 : INPUTS-1];
 wire signed [NUM_W - 1 : 0] outputs      [0 : OUTPUTS-1];
-reg  signed [NUM_W - 1 : 0] outputs_diff [0 : OUTPUTS-1];
+wire signed [NUM_W - 1 : 0] outputs_diff [0 : OUTPUTS-1];
 
 wand all_ready = 1'd1;
 
@@ -201,6 +201,7 @@ always #10 clk = !clk;
 
 initial begin
     #10000000
+    $display("Simulation timed-out");
     $stop;
 end
 
@@ -449,9 +450,7 @@ end
 // end endtask
 
 task check_f(); 
-    integer w_off;
 begin
-    w_off = 0;
     // $display(" CHECK LAYER %0d = %b", LAYER_ID, {matches_f_sim});
     if(!matches_f_sim)
     for(i = 0; i < OUTPUTS; i++) begin
