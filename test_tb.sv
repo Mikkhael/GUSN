@@ -17,11 +17,12 @@ parameter RAM_ADDR_W = 8;
 parameter RAM_DATA_W = NUM_W;
 parameter RAM_SIZE   = 2**RAM_ADDR_W;
 
-parameter RELU_SHIFT = 4;
+parameter RELU_SHIFT = 6;
 parameter RELU_MAX   = 1;
+parameter LEARNING_SHIFT = 2;
 
 parameter LAYERS_COUNT      = 3;
-parameter integer LAYER_SIZES [0:3] = {INPUTS, 3, 2, OUTPUTS};
+parameter integer LAYER_SIZES [0:3] = {INPUTS, 8, 4, OUTPUTS};
 
 parameter OUTPUTS_W = $clog2(OUTPUTS);
 
@@ -82,6 +83,8 @@ generate for(i = 0; i < LAYERS_COUNT; i++) begin : generate_layers
 localparam i_prev = (i == 0)                ? 0 : i - 1;
 localparam i_next = (i == LAYERS_COUNT - 1) ? 0 : i + 1;
 
+localparam L_RELU_MAX = (i == LAYERS_COUNT - 1) ? RELU_MAX : (1 << (INT_W+1));
+
 localparam L_INPUTS  = LAYER_SIZES[i];
 localparam L_OUTPUTS = LAYER_SIZES[i+1];
 localparam L_RAM_START = i == 0 ? 0 : (generate_layers[i_prev].L_RAM_START + ((1 + LAYER_SIZES[i_prev]) *  LAYER_SIZES[i]));
@@ -123,7 +126,8 @@ LAYER # (
     .OUTPUTS            (L_OUTPUTS),
     .RAM_ADDR_START     (L_RAM_START),
     .RELU_SHIFT         (RELU_SHIFT),
-    .RELU_MAX           (RELU_MAX),
+    // .RELU_MAX           (L_RELU_MAX),
+    .LEARNING_SHIFT     (LEARNING_SHIFT),
     .RAM_DELAY          (1)
 ) layer (
     .clk        (clk),
@@ -157,6 +161,9 @@ LAYER # (
 
 LAYER_TEST # (
     .INPUTS(L_INPUTS),.OUTPUTS(L_OUTPUTS),.INT_W(INT_W),.FRAC_W(FRAC_W),.RAM_SIZE(RAM_SIZE),
+    // .RELU_MAX           (L_RELU_MAX),
+    .RELU_SHIFT         (RELU_SHIFT),
+    .LEARNING_SHIFT     (LEARNING_SHIFT),
     .RAM_ADDR_START     (L_RAM_START),
     .LAYER_ID           (i + 1)
 ) layer_test (
@@ -180,13 +187,13 @@ generate for(i = 0; i < OUTPUTS; i++) begin
     assign outputs_diff[i] = loss_function(input_label, i, outputs);
 end endgenerate
 
-function [NUM_W - 1 : 0] loss_function (
+function signed [NUM_W - 1 : 0] loss_function (
     input [OUTPUTS_W-1 : 0] label,
     input [OUTPUTS_W-1 : 0] output_id,
     input signed [NUM_W - 1 : 0] outputs [0 : OUTPUTS - 1]);
 begin
-    if(label == output_id) loss_function = (RELU_MAX - outputs[output_id]);
-    else                   loss_function = (0        - outputs[output_id]);
+    if(label == output_id) loss_function = ((RELU_MAX << FRAC_W) - outputs[output_id]);
+    else                   loss_function = (0                    - outputs[output_id]);
 end endfunction
 
 
@@ -197,8 +204,8 @@ initial begin
     $stop;
 end
 
-parameter TEST_REPS_COUNT  = 50;
-parameter TRAIN_REPS_COUNT = 200;
+parameter TEST_REPS_COUNT  = 100;
+parameter TRAIN_REPS_COUNT = 1000;
 
 integer correct_predictions = 0;
 integer tested_predictions  = 0;
@@ -210,6 +217,7 @@ integer k;
 initial begin
     for(k = 0; k<RAM_SIZE; k++) begin
         ram.data[k] = $random() % (1 << (FRAC_W - 1));
+        // ram.data[k] = 1 << FRAC_W;
         if($random() % 2 == 0) ram.data[k] = -ram.data[k];
     end
     #100;
@@ -218,23 +226,27 @@ initial begin
     #100;
     correct_predictions = 0;
     tested_predictions  = 0;
+    $random(1234);
     for(k = 0; k < TEST_REPS_COUNT; k++) begin
-        $display("TEST BASE %d", k);
-        test_xor_once($random() & 3'b111);
+        // $display("TEST BASE %d", k);
+        test_xor_once($random() % (2**INPUTS));
     end
     correct_predictions_base = correct_predictions;
     tested_predictions_base  = tested_predictions;
     #100;
     for(k = 0; k < TRAIN_REPS_COUNT; k++) begin
-        $display("TRAIN %d", k);
-        train_xor_once($random() & 3'b111);
+        // $display("TRAIN %d", k);
+        train_xor_once($random() % (2**INPUTS));
+        // train_xor_once(3'b111);
     end
+    $display("--------");
     #100;
     correct_predictions = 0;
     tested_predictions  = 0;
+    $random(1234);
     for(k = 0; k < TEST_REPS_COUNT; k++) begin
-        $display("TEST FINAL %d", k);
-        test_xor_once($random() & 3'b111);
+        // $display("TEST FINAL %d", k);
+        test_xor_once($random() % (2**INPUTS));
     end
     $display("BASE:  %0d/%0d", correct_predictions_base, tested_predictions_base);
     $display("FINAL: %0d/%0d", correct_predictions, tested_predictions);
@@ -243,28 +255,29 @@ initial begin
 end
 
 
-task automatic test_xor_once(input [INPUTS-1 : 0] ins); begin
-    input_label = ^ins;
+task automatic set_random_input(input [INPUTS-1 : 0] ins); begin
     for(j = 0; j < INPUTS; j++) begin
-        inputs[j] = ins[j] ? (1 << FRAC_W) : ((-1) << FRAC_W);
+        inputs[j] = ($random() % (2**FRAC_W)) + (ins[j] << (FRAC_W+3));
     end
+    input_label = ^ins;
+end endtask
+
+task automatic test_xor_once(input [INPUTS-1 : 0] ins); begin
+    set_random_input(ins);
     #20; start_f = 1;
     #20; start_f = 0;
     wait(all_ready);
     #20;
-    // generate_layers[0].layer_test.check_f();
-    // generate_layers[1].layer_test.check_f();
-    // generate_layers[2].layer_test.check_f();
+    generate_layers[0].layer_test.check_f();
+    generate_layers[1].layer_test.check_f();
+    generate_layers[2].layer_test.check_f();
     correct_predictions += input_label == output_label;
     tested_predictions  += 1;
-    // $display("TEST RESULT (%b) i:%0d - o:%0d | eff: %0d/%0d", ins, input_label, output_label, correct_predictions, tested_predictions);
+    $display("TEST RESULT (%b) i:%0d - o:%0d | eff: %0d/%0d", ins, input_label, output_label, correct_predictions, tested_predictions);
 end endtask
 
 task automatic train_xor_once(input [INPUTS-1 : 0] ins); begin
-    input_label = ^ins;
-    for(j = 0; j < INPUTS; j++) begin
-        inputs[j] = ins[j] ? (1 << FRAC_W) : ((-1) << FRAC_W);
-    end
+    set_random_input(ins);
     #20; start_f = 1;
     #20; start_f = 0;
     wait(all_ready);
@@ -272,23 +285,24 @@ task automatic train_xor_once(input [INPUTS-1 : 0] ins); begin
     #20; start_b = 0;
     wait(all_ready);
     #20;
-    // generate_layers[0].layer_test.check_all();
-    // generate_layers[1].layer_test.check_all();
-    // generate_layers[2].layer_test.check_all();
+    generate_layers[0].layer_test.check_all();
+    generate_layers[1].layer_test.check_all();
+    generate_layers[2].layer_test.check_all();
 end endtask
 
 endmodule
 
 module LAYER_TEST # (
-    parameter INPUTS  = 3,
-    parameter OUTPUTS = 2,
-    parameter INT_W  = 8,
-    parameter FRAC_W = 8,
-    parameter RAM_SIZE   = 0,
-    parameter RELU_SHIFT = 4,
-    parameter RELU_MAX   = 1,
-    parameter RAM_ADDR_START = 0,
-    parameter LAYER_ID = 0,
+    parameter INPUTS  = 'x,
+    parameter OUTPUTS = 'x,
+    parameter INT_W  = 'x,
+    parameter FRAC_W = 'x,
+    parameter RAM_SIZE   = 'x,
+    parameter RELU_SHIFT = 'x,
+    // parameter RELU_MAX   = 'x,
+    parameter LEARNING_SHIFT = 'x,
+    parameter RAM_ADDR_START = 'x,
+    parameter LAYER_ID = 'x,
     parameter NUM_W  = INT_W + FRAC_W
 )(
     input clk,
@@ -342,7 +356,7 @@ wire results_f_diffshift_sim [0 : OUTPUTS-1];
 genvar g;
 generate for(g=0; g<OUTPUTS; g++) begin
 assign results_f_diffshift_sim[g] =
-        results_f_sim[g] > (RELU_MAX << FRAC_W) ? 1 :
+        // results_f_sim[g] > (RELU_MAX << FRAC_W) ? 1 :
         results_f_sim[g] < 0                    ? 1 :
                                                   0;
 end endgenerate
@@ -390,13 +404,16 @@ always @(posedge clk, negedge nreset) begin
                     if(j == INPUTS) begin
                         temp2 = 0;
                         temp                                         = my_mult(1 << FRAC_W, inputs_b[i], results_f_diffshift_sim[i]);
+                        temp = temp >>> LEARNING_SHIFT;
                         results_bw_sim[ram_off_sim - RAM_ADDR_START] = my_add (ram_data[ram_off_sim], temp);
                     end else begin
                         temp2            = my_mult(ram_data[ram_off_sim], inputs_b[i], results_f_diffshift_sim[i]);
                         results_b_sim[j] = my_add (results_b_sim[j], temp2);
                         temp                                         = my_mult(inputs_f[j], inputs_b[i], results_f_diffshift_sim[i]);
+                        temp = temp >>> LEARNING_SHIFT;
                         results_bw_sim[ram_off_sim - RAM_ADDR_START] = my_add (ram_data[ram_off_sim], temp);
                     end
+                    // $display(" TEMP %h", temp);
                     // $display("BACK   %0d = OUT: %0d (%h) <%h>, IN: %0d (%h), RAM: %0d (%h)", LAYER_ID, j, results_b_sim[j], temp2, i, inputs_b[i], ram_off_sim, ram_data[ram_off_sim]);
                     // $display("BACK_W %0d = OUT: %0d (%h) <%h>, IN: %0d (%h), INF: %0d (%h)", LAYER_ID, ram_off_sim - RAM_ADDR_START, results_bw_sim[ram_off_sim - RAM_ADDR_START], temp, i, inputs_b[i], j, inputs_f[j]);
                     ram_off_sim += 1;
@@ -406,6 +423,30 @@ always @(posedge clk, negedge nreset) begin
     end
 end
 
+
+// task initialize_weights();
+//     real fan_in;
+//     real fan_out;
+//     real radius_real;
+//     logic [NUM_W - 1 : 0] radius_fixed;
+//     integer ram_cnt;
+
+// begin
+
+//     ram_cnt = 0;
+//     fan_in  = INPUTS;
+//     fan_out = OUTPUTS;
+//     radius_real = $sqrt(12.0 / (fan_in + fan_out));
+//     radius_real *= 2**FRAC_W;
+//     radius_fixed = $floor(radius_real);
+
+//     for (i = 0; i <= OUTPUTS; i++) begin
+//         for (j = 0; j <= INPUTS; j++) begin
+            
+//         end
+//     end
+
+// end endtask
 
 task check_f(); 
     integer w_off;

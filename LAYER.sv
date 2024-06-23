@@ -1,17 +1,17 @@
 module LAYER #(
-    parameter INT_W  = 8,
-    parameter FRAC_W = 8,
+    parameter INT_W  = 'x,
+    parameter FRAC_W = 'x,
 
-    parameter INPUTS  = 1,
-    parameter OUTPUTS = 1,
+    parameter INPUTS  = 'x,
+    parameter OUTPUTS = 'x,
 
-    parameter RAM_ADDR_W = 8,
-    parameter RAM_ADDR_START = 0,
+    parameter RAM_ADDR_W = 'x,
+    parameter RAM_ADDR_START = 'x,
     
-    parameter RAM_DELAY = 3,
+    parameter RAM_DELAY = 'x,
 
-    parameter RELU_SHIFT = 4,
-    parameter RELU_MAX   = 4,
+    parameter RELU_SHIFT = 'x,
+    parameter LEARNING_SHIFT = 'x,
     parameter NUM_W = INT_W + FRAC_W
 ) (
     input clk,
@@ -99,14 +99,14 @@ module LAYER #(
 
     function signed [NUM_W - 1 : 0] activation_clamped_RELU (input signed [NUM_W - 1 : 0] in); begin
         activation_clamped_RELU =
-            in > (RELU_MAX << FRAC_W) ? ((in - (RELU_MAX << FRAC_W)) >>> RELU_SHIFT) + (RELU_MAX << FRAC_W) :
+            // in > (RELU_MAX << FRAC_W) ? ((in - (RELU_MAX << FRAC_W)) >>> RELU_SHIFT) + (RELU_MAX << FRAC_W) :
             in < 0                    ? ((in                       ) >>> RELU_SHIFT)                        :
                                         ((in                       )               );
     end endfunction
     
     function activation_clamped_RELU_diffshift (input signed [NUM_W - 1 : 0] in); begin
         activation_clamped_RELU_diffshift =
-            in > (RELU_MAX << FRAC_W) ? 1'd1 :
+            // in > (RELU_MAX << FRAC_W) ? 1'd1 :
             in < 0                    ? 1'd1 :
                                         1'd0;
     end endfunction
@@ -216,9 +216,9 @@ module LAYER #(
                 if(cnt_delay == 0) begin
                     ram_write      <= 1'd1;
                     ram_addr_write <= ram_addr_write + 1'd1;
-                         if(cnt_w_real != INPUTS)          ram_data_write <= get_clumped_sum(ram_data_read, mult_res);
-                    else if(results_f_shifts[cnt_n_real])  ram_data_write <= get_clumped_sum(ram_data_read, inputs_b[cnt_n_real] >>> RELU_SHIFT);
-                    else                                   ram_data_write <= get_clumped_sum(ram_data_read, inputs_b[cnt_n_real]);
+                         if(cnt_w_real != INPUTS)          ram_data_write <= get_clumped_sum(ram_data_read, mult_res >>> LEARNING_SHIFT);
+                    else if(results_f_shifts[cnt_n_real])  ram_data_write <= get_clumped_sum(ram_data_read, inputs_b[cnt_n_real] >>> (RELU_SHIFT + LEARNING_SHIFT));
+                    else                                   ram_data_write <= get_clumped_sum(ram_data_read, inputs_b[cnt_n_real] >>> LEARNING_SHIFT);
                     if(is_last_weight) begin // Check if last operation
                         state <= FINALIZE;
                     end
