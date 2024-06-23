@@ -48,9 +48,20 @@ module LAYER #(
 
     // State
 
-    reg is_waiting_for_ready;
-    reg is_busy;
-    reg is_back;
+    enum {
+        IDLE,
+        WAIT_FOR_READY_F,
+        CALC_F,
+        WAIT_FOR_READY_B,
+        CALC_B1,
+        CALC_B2,
+        FINALIZE
+    } state;
+
+    wire is_waiting_for_ready   = state == WAIT_FOR_READY_F || state == WAIT_FOR_READY_B;
+    wire is_busy                = state != IDLE;
+    wire is_back                = state == WAIT_FOR_READY_B || state == CALC_B1 || state == CALC_B2;
+    wire is_back_weights        = state == CALC_B2;
 
     reg [$clog2(RAM_DELAY+1) - 1:0] cnt_delay;
     reg [OUTPUTS_W - 1 : 0]         cnt_n_ram;
@@ -58,16 +69,20 @@ module LAYER #(
     reg [OUTPUTS_W - 1 : 0]         cnt_n_real;
     reg [ INPUTS_W - 1 : 0]         cnt_w_real;
 
+    wire is_last_weight = cnt_n_real == OUTPUTS-1 && cnt_w_real == INPUTS;
+
     // Out
 
     reg signed [NUM_W - 1 : 0] results_f        [0 : OUTPUTS - 1];
     wire                       results_f_shifts [0 : OUTPUTS - 1];
     reg signed [NUM_W - 1 : 0] results_b        [0 : INPUTS  - 1];
 
-    wire signed [NUM_W - 1 : 0] v1 = ram_data_read;
+    wire signed [NUM_W - 1 : 0] v1 = is_back_weights ? 
+                                  inputs_f[cnt_w_real] : // input
+                                  ram_data_read;         // weight
     wire signed [NUM_W - 1 : 0] v2 = is_back ?
-                                  inputs_b[cnt_n_real] : 
-                                  inputs_f[cnt_w_real];
+                                  inputs_b[cnt_n_real] : // output
+                                  inputs_f[cnt_w_real];  // input
 
     assign mult_v1 = mult_en ? v1 : 0;
     assign mult_v2 = mult_en ? v2 : 0;
@@ -159,69 +174,84 @@ module LAYER #(
         if(!nreset) begin
             RESET_COUNTERS();
             RESET_BUSES();
-            is_back <= 1'd0;
-            is_busy <= 1'd0;
-            is_waiting_for_ready <= 1'd0;
+            state     <= IDLE;
             results_f <= '{default: 0};
             results_b <= '{default: 0};
         end else if(enable) begin
-            if(is_busy &&  is_back && is_waiting_for_ready) begin // Wait for ready for BackPropagation
+            if(state == WAIT_FOR_READY_B) begin // Wait for ready for BackPropagation
                 if(ready_b_in) begin
-                    cnt_delay     <= RAM_DELAY;
-                    ram_addr_read <= RAM_ADDR_START;
-                    mult_en       <= 1'd1;
-                    is_waiting_for_ready <= 1'd0;
+                    cnt_delay      <= RAM_DELAY;
+                    ram_addr_read  <= RAM_ADDR_START;
+                    mult_en        <= 1'd1;
+                    state          <= CALC_B1;
                 end
             end else 
-            if(is_busy && !is_back && is_waiting_for_ready) begin // Wait for ready for ForwardPass
+            if(state == WAIT_FOR_READY_F) begin // Wait for ready for ForwardPass
                 if(ready_f_in) begin
-                    cnt_delay     <= RAM_DELAY;
-                    ram_addr_read <= RAM_ADDR_START;
-                    mult_en       <= 1'd1;
-                    is_waiting_for_ready <= 1'd0;
+                    cnt_delay      <= RAM_DELAY;
+                    ram_addr_read  <= RAM_ADDR_START;
+                    mult_en        <= 1'd1;
+                    state          <= CALC_F;
                 end
             end else 
-            if(is_busy &&  is_back) begin // Calculate BackPropagation
+            if(state == CALC_B1) begin // Calculate BackPropagation - Phase 1 (inputs)
                 INC_RAM_READ();
                 if(cnt_delay == 0) begin
                     if(cnt_w_real != INPUTS) begin
-                        results_b[cnt_w_real] <= get_clumped_sum(
-                            results_b[cnt_w_real],
-                            mult_res
-                        );
+                        results_b[cnt_w_real] <= get_clumped_sum( results_b[cnt_w_real], mult_res);
                     end
-                    if(cnt_n_real == OUTPUTS-1 && cnt_w_real == INPUTS) begin // Check if last operation
-                        is_busy <= 1'd0;
+                    if(is_last_weight) begin // Check if last operation
                         RESET_COUNTERS();
                         RESET_BUSES();
+                        cnt_delay       <= RAM_DELAY;
+                        ram_addr_read   <= RAM_ADDR_START;
+                        ram_addr_write  <= RAM_ADDR_START - 1'd1;
+                        mult_en         <= 1'd1;
+                        state           <= CALC_B2;
                     end
                 end
-            end else 
-            if(is_busy && !is_back) begin // Calculate ForwardPass
+            end else
+            if(state == CALC_B2) begin // Calculate BackPropagation - Phase 2 (weights)
+                INC_RAM_READ();
+                if(cnt_delay == 0) begin
+                    ram_write      <= 1'd1;
+                    ram_addr_write <= ram_addr_write + 1'd1;
+                         if(cnt_w_real != INPUTS)          ram_data_write <= get_clumped_sum(ram_data_read, mult_res);
+                    else if(results_f_shifts[cnt_n_real])  ram_data_write <= get_clumped_sum(ram_data_read, inputs_b[cnt_n_real] >>> RELU_SHIFT);
+                    else                                   ram_data_write <= get_clumped_sum(ram_data_read, inputs_b[cnt_n_real]);
+                    if(is_last_weight) begin // Check if last operation
+                        state <= FINALIZE;
+                    end
+                end
+            end else
+            if(state == CALC_F) begin // Calculate ForwardPass
                 INC_RAM_READ();
                 if(cnt_delay == 0) begin
                     results_f[cnt_n_real] <= get_clumped_sum(
                         results_f[cnt_n_real],
                         cnt_w_real == INPUTS ? ram_data_read : mult_res
                     );
-                    if(cnt_n_real == OUTPUTS-1 && cnt_w_real == INPUTS) begin // Check if last operation
-                        is_busy <= 1'd0;
+                    if(is_last_weight) begin // Check if last operation
                         RESET_COUNTERS();
                         RESET_BUSES();
+                        state <= IDLE;
                     end
                 end
             end else 
-            if(start_f || start_b) begin // Wait for start
+            if(state == FINALIZE) begin
                 RESET_COUNTERS();
                 RESET_BUSES();
-                is_busy <= 1'd1;
-                is_waiting_for_ready <= 1'd1;
+                state <= IDLE;
+            end else
+            if(state == IDLE && (start_f || start_b)) begin // Wait for start
+                RESET_COUNTERS();
+                RESET_BUSES();
                 if(start_b) begin
                     results_b <= '{default: 0};
-                    is_back  <= 1'b1;
+                    state     <= WAIT_FOR_READY_B;
                 end else begin
                     results_f <= '{default: 0};
-                    is_back  <= 1'b0;
+                    state     <= WAIT_FOR_READY_F;
                 end
             end
         end

@@ -21,17 +21,23 @@ parameter RELU_SHIFT = 4;
 parameter RELU_MAX   = 1;
 
 parameter LAYERS_COUNT      = 3;
-parameter integer LAYER_SIZES [0:3] = {INPUTS, 5, 4, OUTPUTS};
+parameter integer LAYER_SIZES [0:3] = {INPUTS, 3, 2, OUTPUTS};
+
+parameter OUTPUTS_W = $clog2(OUTPUTS);
 
 reg start_b = 0;
 reg start_f = 0;
 
+reg         [OUTPUTS_W - 1 : 0] input_label;
+wire        [OUTPUTS_W - 1 : 0] output_label;
 reg  signed [NUM_W - 1 : 0] inputs       [0 : INPUTS-1];
 wire signed [NUM_W - 1 : 0] inputs_diff  [0 : INPUTS-1];
 wire signed [NUM_W - 1 : 0] outputs      [0 : OUTPUTS-1];
 reg  signed [NUM_W - 1 : 0] outputs_diff [0 : OUTPUTS-1];
 
 wand all_ready = 1'd1;
+
+assign output_label = outputs[0] < outputs[1];
 
 wor  ram_write;
 wor  [RAM_ADDR_W - 1 : 0] ram_addr_write;
@@ -171,10 +177,9 @@ assign outputs     = generate_layers[LAYERS_COUNT - 1].l_outputs_f;
 assign inputs_diff = generate_layers[0].l_outputs_b;
 
 generate for(i = 0; i < OUTPUTS; i++) begin
-    assign outputs_diff[i] = loss_function(1, i, outputs);
+    assign outputs_diff[i] = loss_function(input_label, i, outputs);
 end endgenerate
 
-parameter OUTPUTS_W = $clog2(OUTPUTS);
 function [NUM_W - 1 : 0] loss_function (
     input [OUTPUTS_W-1 : 0] label,
     input [OUTPUTS_W-1 : 0] output_id,
@@ -192,49 +197,85 @@ initial begin
     $stop;
 end
 
+parameter TEST_REPS_COUNT  = 50;
+parameter TRAIN_REPS_COUNT = 200;
+
+integer correct_predictions = 0;
+integer tested_predictions  = 0;
+
+integer correct_predictions_base = 0;
+integer tested_predictions_base  = 0;
 integer j;
+integer k;
 initial begin
-    for(j = 0; j<RAM_SIZE; j++) begin
-        ram.data[j] = $random() % (1 << (FRAC_W + 1));
-        if($random() % 2 == 0) ram.data[j] = -ram.data[j];
+    for(k = 0; k<RAM_SIZE; k++) begin
+        ram.data[k] = $random() % (1 << (FRAC_W - 1));
+        if($random() % 2 == 0) ram.data[k] = -ram.data[k];
     end
     #100;
     nreset = 1;
     enable = 1;
     #100;
-
-    for(j = 0; j < INPUTS; j++) begin
-        inputs[j] = (j << FRAC_W) + 2**(FRAC_W-1);
+    correct_predictions = 0;
+    tested_predictions  = 0;
+    for(k = 0; k < TEST_REPS_COUNT; k++) begin
+        $display("TEST BASE %d", k);
+        test_xor_once($random() & 3'b111);
     end
-    start_f = 1;
-    #20
-    start_f = 0;
-
-    wait(all_ready);
-
-    $display("LAYER 1 MATCHES F:  %d", generate_layers[0].layer_test.matches_f_sim);
-    $display("LAYER 2 MATCHES F:  %d", generate_layers[1].layer_test.matches_f_sim);
-    $display("LAYER 3 MATCHES F:  %d", generate_layers[2].layer_test.matches_f_sim);
-
-    #20;
-    start_b = 1;
-    #20
-    start_b = 0;
-
-    wait(all_ready);
-
-    $display("LAYER 3 MATCHES B:  %d", generate_layers[2].layer_test.matches_b_sim);
-    $display("LAYER 2 MATCHES B:  %d", generate_layers[1].layer_test.matches_b_sim);
-    $display("LAYER 1 MATCHES B:  %d", generate_layers[0].layer_test.matches_b_sim);
-    
-    $display("LAYER 3 MATCHES BW: %d", generate_layers[2].layer_test.matches_bw_sim);
-    $display("LAYER 2 MATCHES BW: %d", generate_layers[1].layer_test.matches_bw_sim);
-    $display("LAYER 1 MATCHES BW: %d", generate_layers[0].layer_test.matches_bw_sim);
-
+    correct_predictions_base = correct_predictions;
+    tested_predictions_base  = tested_predictions;
+    #100;
+    for(k = 0; k < TRAIN_REPS_COUNT; k++) begin
+        $display("TRAIN %d", k);
+        train_xor_once($random() & 3'b111);
+    end
+    #100;
+    correct_predictions = 0;
+    tested_predictions  = 0;
+    for(k = 0; k < TEST_REPS_COUNT; k++) begin
+        $display("TEST FINAL %d", k);
+        test_xor_once($random() & 3'b111);
+    end
+    $display("BASE:  %0d/%0d", correct_predictions_base, tested_predictions_base);
+    $display("FINAL: %0d/%0d", correct_predictions, tested_predictions);
     #100;
     $stop;
 end
 
+
+task automatic test_xor_once(input [INPUTS-1 : 0] ins); begin
+    input_label = ^ins;
+    for(j = 0; j < INPUTS; j++) begin
+        inputs[j] = ins[j] ? (1 << FRAC_W) : ((-1) << FRAC_W);
+    end
+    #20; start_f = 1;
+    #20; start_f = 0;
+    wait(all_ready);
+    #20;
+    // generate_layers[0].layer_test.check_f();
+    // generate_layers[1].layer_test.check_f();
+    // generate_layers[2].layer_test.check_f();
+    correct_predictions += input_label == output_label;
+    tested_predictions  += 1;
+    // $display("TEST RESULT (%b) i:%0d - o:%0d | eff: %0d/%0d", ins, input_label, output_label, correct_predictions, tested_predictions);
+end endtask
+
+task automatic train_xor_once(input [INPUTS-1 : 0] ins); begin
+    input_label = ^ins;
+    for(j = 0; j < INPUTS; j++) begin
+        inputs[j] = ins[j] ? (1 << FRAC_W) : ((-1) << FRAC_W);
+    end
+    #20; start_f = 1;
+    #20; start_f = 0;
+    wait(all_ready);
+    #20; start_b = 1;
+    #20; start_b = 0;
+    wait(all_ready);
+    #20;
+    // generate_layers[0].layer_test.check_all();
+    // generate_layers[1].layer_test.check_all();
+    // generate_layers[2].layer_test.check_all();
+end endtask
 
 endmodule
 
@@ -348,22 +389,60 @@ always @(posedge clk, negedge nreset) begin
                 for(j = 0; j <= INPUTS; j++) begin
                     if(j == INPUTS) begin
                         temp2 = 0;
-                        temp                        = my_mult(1 << FRAC_W, inputs_b[i], results_f_diffshift_sim[i]);
-                        results_bw_sim[ram_off_sim] = my_add (results_bw_sim[ram_off_sim], temp);
+                        temp                                         = my_mult(1 << FRAC_W, inputs_b[i], results_f_diffshift_sim[i]);
+                        results_bw_sim[ram_off_sim - RAM_ADDR_START] = my_add (ram_data[ram_off_sim], temp);
                     end else begin
                         temp2            = my_mult(ram_data[ram_off_sim], inputs_b[i], results_f_diffshift_sim[i]);
                         results_b_sim[j] = my_add (results_b_sim[j], temp2);
-                        temp                        = my_mult(inputs_f[j], inputs_b[i], results_f_diffshift_sim[i]);
-                        results_bw_sim[ram_off_sim] = my_add (ram_data[ram_off_sim], temp);
+                        temp                                         = my_mult(inputs_f[j], inputs_b[i], results_f_diffshift_sim[i]);
+                        results_bw_sim[ram_off_sim - RAM_ADDR_START] = my_add (ram_data[ram_off_sim], temp);
                     end
-                    $display("BACK   %0d = OUT: %0d (%h) <%h>, IN: %0d (%h), RAM: %0d (%h)", LAYER_ID, j, results_b_sim[j], temp2, i, inputs_b[i], ram_off_sim, ram_data[ram_off_sim]);
-                    $display("BACK_W %0d = OUT: %0d (%h) <%h>, IN: %0d (%h), INF: %0d (%h)", LAYER_ID, ram_off_sim, results_bw_sim[ram_off_sim], temp, i, inputs_b[i], j, inputs_f[j]);
+                    // $display("BACK   %0d = OUT: %0d (%h) <%h>, IN: %0d (%h), RAM: %0d (%h)", LAYER_ID, j, results_b_sim[j], temp2, i, inputs_b[i], ram_off_sim, ram_data[ram_off_sim]);
+                    // $display("BACK_W %0d = OUT: %0d (%h) <%h>, IN: %0d (%h), INF: %0d (%h)", LAYER_ID, ram_off_sim - RAM_ADDR_START, results_bw_sim[ram_off_sim - RAM_ADDR_START], temp, i, inputs_b[i], j, inputs_f[j]);
                     ram_off_sim += 1;
                 end
             end
         end
     end
 end
+
+
+task check_f(); 
+    integer w_off;
+begin
+    w_off = 0;
+    // $display(" CHECK LAYER %0d = %b", LAYER_ID, {matches_f_sim});
+    if(!matches_f_sim)
+    for(i = 0; i < OUTPUTS; i++) begin
+        $display("   OUTPUT_F  [%0d] -> REF=%h  MOD=%h", i, results_f_sim[i], results_f[i]);
+    end
+    if(!matches_f_sim && LAYER_ID == 3)
+        $stop;
+end endtask
+
+task check_all(); 
+    integer w_off;
+begin
+    w_off = 0;
+    // $display(" CHECK LAYER %0d = %b", LAYER_ID, {matches_f_sim, matches_b_sim, matches_bw_sim});
+    if(!matches_f_sim)
+    for(i = 0; i < OUTPUTS; i++) begin
+        $display("   OUTPUT_F  [%0d] -> REF=%h  MOD=%h", i, results_f_sim[i], results_f[i]);
+    end
+    if(!matches_b_sim)
+    for(i = 0; i < INPUTS; i++) begin
+        $display("   OUTPUT_B  [%0d] -> REF=%h  MOD=%h", i, results_b_sim[i], results_b[i]);
+    end
+    if(!matches_bw_sim)
+    for(i = 0; i < OUTPUTS; i++) begin
+        for(j = 0; j <= INPUTS; j++) begin
+            $display("   OUTPUT_BW [i:%0d, o:%0d] -> REF=%h  MOD=%h", j, i, results_bw_sim[w_off], ram_data[w_off + RAM_ADDR_START]);
+            w_off += 1;
+        end
+    end
+    if(!matches_bw_sim && LAYER_ID == 3)
+        $stop;
+end endtask
 
 function signed [NUM_W - 1 : 0] my_mult(input signed [NUM_W - 1 : 0] v1, input signed [NUM_W - 1 : 0] v2, input with_shift);
     logic signed [NUM_W*2 - 1 : 0] temp;
